@@ -5,7 +5,7 @@ import sys
 import time
 import zipfile
 import tempfile
-import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,16 +51,16 @@ st.markdown(
     .stProgress > div > div > div > div {
         background: linear-gradient(90deg, #4f46e5 0%, #06b6d4 100%);
     }
-    .status-badge {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 600;
-        font-size: 0.85rem;
+    .path-box {
+        background-color: #1e293b;
+        color: #38bdf8;
+        padding: 10px 15px;
+        border-radius: 8px;
+        font-family: monospace;
+        font-size: 0.95rem;
+        word-break: break-all;
+        border: 1px solid #334155;
     }
-    .badge-success { background-color: #059669; color: white; }
-    .badge-failed { background-color: #dc2626; color: white; }
-    .badge-info { background-color: #2563eb; color: white; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -77,6 +77,21 @@ VALID_EXTENSIONS = {
     ".heic",
     ".heif",
 }
+
+
+# ============================================================
+# DEFAULT SYSTEM DOWNLOADS DIRECTORY
+# ============================================================
+
+def get_default_downloads_dir():
+    """Get the standard OS Downloads folder path with a new timestamped subfolder."""
+    home_dir = Path.home()
+    downloads_path = home_dir / "Downloads"
+    if not downloads_path.exists():
+        # Fallback to current working directory if Downloads folder doesn't exist
+        downloads_path = Path.cwd()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(downloads_path / f"Product_Catalog_{timestamp}")
 
 
 # ============================================================
@@ -145,7 +160,6 @@ def split_image_urls(value, delimiter="|"):
         return []
 
     if delimiter == "Auto":
-        # Check for common delimiters
         if "|" in val_str:
             tokens = val_str.split("|")
         elif "\n" in val_str:
@@ -314,7 +328,6 @@ def auto_detect_columns(columns):
         for cand in candidates:
             if cand in cols_lower:
                 return cols_lower[cand]
-        # Partial match
         for cand in candidates:
             for k in cols_lower:
                 if cand in k:
@@ -344,7 +357,13 @@ def auto_detect_columns(columns):
 
 def main():
     st.markdown('<div class="main-header">🛍️ Product Image & Info Downloader</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Upload a CSV or Excel file to batch download product images and generate organized <code>product_info.txt</code> files for each item.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Upload a CSV or Excel spreadsheet to batch download images and generate organized <code>product_info.txt</code> files in a new Downloads folder or as a ZIP archive.</div>', unsafe_allow_html=True)
+
+    # Initialize Session State
+    if "download_result" not in st.session_state:
+        st.session_state.download_result = None
+    if "target_folder_default" not in st.session_state:
+        st.session_state.target_folder_default = get_default_downloads_dir()
 
     # --------------------------------------------------------
     # SIDEBAR: SETTINGS & CONFIGURATION
@@ -366,26 +385,30 @@ def main():
             min_value=1,
             max_value=16,
             value=6,
-            help="Higher threads will download images faster.",
+            help="Higher threads download multiple images simultaneously.",
         )
 
         timeout = st.number_input("Request timeout (seconds):", min_value=5, max_value=120, value=30)
         retries = st.number_input("Retry attempts:", min_value=1, max_value=5, value=3)
 
-        st.subheader("Destination Mode")
-        output_mode = st.radio(
-            "Select how to receive files:",
-            ["Save to Local Folder", "Download as ZIP Archive (Cloud / Local)"],
-            index=0,
+        st.subheader("📁 Output Folder Settings")
+        save_to_local = st.checkbox(
+            "Save directly to computer folder (Local Mode)",
+            value=True,
+            help="Automatically creates a new folder in your system Downloads folder.",
         )
 
-        local_dir = "SAWERA_DOWNLOADED"
-        if output_mode == "Save to Local Folder":
-            local_dir = st.text_input(
-                "Local Output Directory:",
-                value="SAWERA_DOWNLOADED",
-                help="The directory path on your computer where folders will be created.",
-            )
+        custom_folder = st.text_input(
+            "Local Destination Path:",
+            value=st.session_state.target_folder_default,
+            disabled=not save_to_local,
+            help="Where product folders will be saved on your computer.",
+        )
+
+        if save_to_local:
+            if st.button("🔄 Generate New Folder Name"):
+                st.session_state.target_folder_default = get_default_downloads_dir()
+                st.rerun()
 
     # --------------------------------------------------------
     # STEP 1: FILE UPLOAD
@@ -398,7 +421,6 @@ def main():
 
     if uploaded_file is None:
         st.info("👆 Upload a CSV or Excel spreadsheet above to get started.")
-        # Provide sample format info
         with st.expander("ℹ️ Supported Format Information"):
             st.markdown(
                 """
@@ -486,7 +508,6 @@ def main():
     # --------------------------------------------------------
     # STEP 3: PREVIEW & STATS
     # --------------------------------------------------------
-    # Calculate stats
     total_products = len(df)
     total_images = sum(len(split_image_urls(row[col_map["images"]], delimiter)) for _, row in df.iterrows())
 
@@ -508,10 +529,10 @@ def main():
     with tab_info:
         st.markdown(
             """
-            **Each product folder will include:**
-            1. Downloaded images sequentially named (`01.webp`, `02.jpg`, etc.)
+            **Each product folder contains:**
+            1. Downloaded images sequentially numbered (`01.webp`, `02.jpg`, etc.)
             2. `product_info.txt` containing full details (Name, SKU, Price, Description, Sizes, Fabric, etc.)
-            3. A master `DOWNLOAD_SUMMARY.txt` with statistics and any failed URLs.
+            3. Master `DOWNLOAD_SUMMARY.txt` with statistics and error logs.
             """
         )
 
@@ -540,16 +561,21 @@ def main():
         progress_bar = st.progress(0.0)
         status_text = st.empty()
         log_box = st.empty()
-        
-        # Working folder setup
-        if output_mode == "Save to Local Folder":
-            dest_root = Path(local_dir)
-            dest_root.mkdir(parents=True, exist_ok=True)
-        else:
-            # Temporary folder for ZIP creation
-            temp_dir = tempfile.TemporaryDirectory()
-            dest_root = Path(temp_dir.name) / "DOWNLOADED_PRODUCTS"
-            dest_root.mkdir(parents=True, exist_ok=True)
+
+        # Temporary working directory for staging files (and packaging ZIP)
+        temp_dir_obj = tempfile.TemporaryDirectory()
+        stage_root = Path(temp_dir_obj.name) / "DOWNLOADED_PRODUCTS"
+        stage_root.mkdir(parents=True, exist_ok=True)
+
+        # Local directory setup if local saving is enabled
+        local_target_path = None
+        if save_to_local:
+            try:
+                local_target_path = Path(custom_folder).expanduser().resolve()
+                local_target_path.mkdir(parents=True, exist_ok=True)
+            except Exception as folder_err:
+                st.warning(f"Could not create local directory '{custom_folder}': {folder_err}. Falling back to staging directory.")
+                local_target_path = None
 
         successful_images = 0
         failed_images_count = 0
@@ -560,7 +586,6 @@ def main():
 
         def log_msg(msg):
             logs.append(msg)
-            # Display last 8 lines
             display_logs = "\n".join(logs[-8:])
             log_box.code(display_logs, language="bash")
 
@@ -570,9 +595,11 @@ def main():
         for idx, (_, row) in enumerate(active_df.iterrows(), start=1):
             product_name = clean_value(row[col_map["name"]], "Product")
             sku = clean_value(row[col_map["sku"]], "SKU")
-            
+
             folder_name = f"{clean_filename(sku)}_{clean_filename(product_name)}"
-            product_folder = dest_root / folder_name
+            
+            # Create product folder in staging directory
+            product_folder = stage_root / folder_name
             product_folder.mkdir(parents=True, exist_ok=True)
 
             raw_imgs = row[col_map["images"]]
@@ -583,14 +610,13 @@ def main():
 
             status_text.markdown(f"**Processing ({idx}/{total_active_products}):** `{sku}` - {product_name[:40]}...")
 
-            # Helper for thread worker
             def download_worker(url_info):
                 img_idx, url = url_info
                 base_name = product_folder / f"{img_idx:02d}"
                 ok, res_name, err = download_single_image(url, base_name, timeout=timeout, retries=retries)
                 return ok, res_name, err, url
 
-            # Parallel download for images of this product
+            # Download images concurrently for this product
             if urls:
                 with ThreadPoolExecutor(max_workers=min(concurrency, len(urls))) as executor:
                     futures = [executor.submit(download_worker, (i, url)) for i, url in enumerate(urls, start=1)]
@@ -603,7 +629,6 @@ def main():
                             failed_images.append((url, err))
                             failed_images_count += 1
 
-            # Sort downloaded images naturally
             downloaded_images.sort()
 
             # Create product_info.txt
@@ -623,11 +648,12 @@ def main():
 
             progress_bar.progress(idx / total_active_products)
 
-        # Create master summary
+        # Create master summary report
         summary_lines = [
             "=" * 70,
             "DOWNLOAD SUMMARY REPORT",
             "=" * 70,
+            f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Total Products Processed: {total_active_products}",
             f"Successfully Downloaded Images: {successful_images}",
             f"Failed Image Downloads: {failed_images_count}",
@@ -642,40 +668,76 @@ def main():
         else:
             summary_lines.append("All images downloaded successfully without errors.")
 
-        summary_file = dest_root / "DOWNLOAD_SUMMARY.txt"
+        summary_file = stage_root / "DOWNLOAD_SUMMARY.txt"
         with open(summary_file, "w", encoding="utf-8") as f:
             f.write("\n".join(summary_lines))
 
+        # Copy to local destination if requested
+        local_saved_success = False
+        if local_target_path:
+            try:
+                import shutil
+                for item in stage_root.iterdir():
+                    dest_item = local_target_path / item.name
+                    if item.is_dir():
+                        if dest_item.exists():
+                            shutil.rmtree(dest_item)
+                        shutil.copytree(item, dest_item)
+                    else:
+                        shutil.copy2(item, dest_item)
+                local_saved_success = True
+            except Exception as copy_err:
+                log_msg(f"[!] Error saving to local destination: {copy_err}")
+
+        # Always build ZIP archive in memory for instant browser download
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(stage_root):
+                for file in files:
+                    full_p = Path(root) / file
+                    rel_p = full_p.relative_to(stage_root)
+                    zipf.write(full_p, arcname=str(rel_p))
+        zip_buffer.seek(0)
+
+        # Save results in session state so UI persists across interactions
+        st.session_state.download_result = {
+            "total_products": total_active_products,
+            "successful_images": successful_images,
+            "failed_images": failed_images_count,
+            "local_path": str(local_target_path) if local_saved_success else None,
+            "zip_data": zip_buffer.getvalue(),
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        }
+
         status_text.markdown("✅ **Download complete!**")
-        st.success("🎉 Process finished successfully!")
 
-        # Show final metrics
+    # --------------------------------------------------------
+    # STEP 5: DISPLAY RESULTS & DOWNLOAD BUTTON
+    # --------------------------------------------------------
+    if st.session_state.download_result:
+        res = st.session_state.download_result
+        st.write("---")
+        st.success("🎉 **Download Task Finished Successfully!**")
+
         c1, c2, c3 = st.columns(3)
-        c1.metric("Products Done", total_active_products)
-        c2.metric("Images Downloaded", successful_images)
-        c3.metric("Failed Images", failed_images_count)
+        c1.metric("Products Done", res["total_products"])
+        c2.metric("Images Downloaded", res["successful_images"])
+        c3.metric("Failed Images", res["failed_images"])
 
-        # Download ZIP button if Zip mode or for convenience
-        if output_mode == "Save to Local Folder":
-            st.info(f"📂 Files saved locally to: `{dest_root.resolve()}`")
-        else:
-            st.write("📦 Packaging files into ZIP archive...")
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(dest_root):
-                    for file in files:
-                        full_path = Path(root) / file
-                        rel_path = full_path.relative_to(dest_root)
-                        zipf.write(full_path, arcname=str(rel_path))
-            
-            zip_buffer.seek(0)
-            st.download_button(
-                label="⬇️ Download All as ZIP Archive",
-                data=zip_buffer,
-                file_name="product_catalog_downloaded.zip",
-                mime="application/zip",
-                type="primary",
-            )
+        if res["local_path"]:
+            st.markdown(f"**📂 Saved to Local Folder:**")
+            st.markdown(f'<div class="path-box">{res["local_path"]}</div>', unsafe_allow_html=True)
+            st.caption("You can open this folder directly in File Explorer on your computer.")
+
+        st.write("")
+        st.download_button(
+            label="⬇️ Download All Folders as ZIP Archive (.zip)",
+            data=res["zip_data"],
+            file_name=f"product_catalog_{res['timestamp']}.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True,
+        )
 
 
 if __name__ == "__main__":
