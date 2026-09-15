@@ -1,0 +1,22 @@
+# Downloaded data & temporary output
+SAWERA_DOWNLOADED/
+*_DOWNLOADED/
+DOWNLOADED_PRODUCTS/
+*.zip
+
+# Python & Environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
