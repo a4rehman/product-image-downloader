@@ -5,6 +5,7 @@ import sys
 import time
 import zipfile
 import tempfile
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -54,12 +55,18 @@ st.markdown(
     .path-box {
         background-color: #1e293b;
         color: #38bdf8;
-        padding: 10px 15px;
+        padding: 12px 16px;
         border-radius: 8px;
         font-family: monospace;
-        font-size: 0.95rem;
+        font-size: 1rem;
         word-break: break-all;
         border: 1px solid #334155;
+    }
+    .option-card {
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 10px;
     }
     </style>
     """,
@@ -80,7 +87,7 @@ VALID_EXTENSIONS = {
 
 
 # ============================================================
-# DEFAULT SYSTEM DOWNLOADS DIRECTORY
+# SYSTEM PATH UTILITIES
 # ============================================================
 
 def is_cloud_environment():
@@ -94,15 +101,15 @@ def is_cloud_environment():
     )
 
 
-def get_default_downloads_dir():
-    """Get the standard OS Downloads folder path with a new timestamped subfolder."""
+def get_system_downloads_folder(subfolder="image_downloader"):
+    """Get the standard OS Downloads/image_downloader folder path."""
     home_dir = Path.home()
     downloads_path = home_dir / "Downloads"
     if not downloads_path.exists():
-        # Fallback to current working directory if Downloads folder doesn't exist
         downloads_path = Path.cwd()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return str(downloads_path / f"Product_Catalog_{timestamp}")
+    if subfolder:
+        return downloads_path / subfolder
+    return downloads_path
 
 
 # ============================================================
@@ -368,19 +375,47 @@ def auto_detect_columns(columns):
 
 def main():
     st.markdown('<div class="main-header">🛍️ Product Image & Info Downloader</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Upload a CSV or Excel spreadsheet to batch download images and generate organized <code>product_info.txt</code> files in a new Downloads folder or as a ZIP archive.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Upload a CSV or Excel spreadsheet to batch download images and generate organized <code>product_info.txt</code> files directly into your <b>Downloads/image_downloader</b> folder or as a <b>ZIP file</b>.</div>', unsafe_allow_html=True)
 
     # Initialize Session State
     if "download_result" not in st.session_state:
         st.session_state.download_result = None
-    if "target_folder_default" not in st.session_state:
-        st.session_state.target_folder_default = get_default_downloads_dir()
 
     # --------------------------------------------------------
     # SIDEBAR: SETTINGS & CONFIGURATION
     # --------------------------------------------------------
     with st.sidebar:
         st.header("⚙️ Configuration")
+
+        st.subheader("📁 Download Destination Options")
+        dest_choice = st.radio(
+            "Select Download Mode:",
+            [
+                "📂 Direct to Downloads Folder (Downloads/image_downloader)",
+                "📦 Download as ZIP file (image_downloader.zip)",
+            ],
+            index=0,
+            help="Option 1 creates a folder named 'image_downloader' in your Downloads directory with all product folders & pictures. Option 2 gives you a single ZIP file download.",
+        )
+
+        is_direct_downloads = "Direct to Downloads Folder" in dest_choice
+
+        if is_direct_downloads:
+            custom_folder_name = st.text_input(
+                "Folder name inside Downloads:",
+                value="image_downloader",
+                help="The folder that will be created inside your Downloads directory.",
+            )
+            use_timestamp = st.checkbox("Append timestamp (e.g. image_downloader_20260916)", value=False)
+            
+            target_subfolder = custom_folder_name.strip() or "image_downloader"
+            if use_timestamp:
+                target_subfolder = f"{target_subfolder}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            target_local_path = get_system_downloads_folder(target_subfolder)
+            st.caption(f"📁 **Destination Path:** `{target_local_path}`")
+        else:
+            target_local_path = None
 
         st.subheader("Image Delimiter")
         delimiter = st.selectbox(
@@ -401,35 +436,6 @@ def main():
 
         timeout = st.number_input("Request timeout (seconds):", min_value=5, max_value=120, value=30)
         retries = st.number_input("Retry attempts:", min_value=1, max_value=5, value=3)
-
-        is_cloud = is_cloud_environment()
-
-        st.subheader("📁 Output / Download Destination")
-        if is_cloud:
-            st.info(
-                "🌐 **Web Cloud Mode Active**\n\n"
-                "Because this app is running in the cloud, files will be packaged into a **ZIP archive** for direct download to your PC's standard **Downloads folder** (`C:\\Users\\...\\Downloads`)."
-            )
-            save_to_local = False
-            custom_folder = ""
-        else:
-            save_to_local = st.checkbox(
-                "Save directly to computer folder (Local Mode)",
-                value=True,
-                help="Automatically creates a new folder in your system Downloads folder.",
-            )
-
-            custom_folder = st.text_input(
-                "Local Destination Path:",
-                value=st.session_state.target_folder_default,
-                disabled=not save_to_local,
-                help="Where product folders will be saved on your computer.",
-            )
-
-            if save_to_local:
-                if st.button("🔄 Generate New Folder Name"):
-                    st.session_state.target_folder_default = get_default_downloads_dir()
-                    st.rerun()
 
     # --------------------------------------------------------
     # STEP 1: FILE UPLOAD
@@ -502,7 +508,6 @@ def main():
             fabric_col = st.selectbox("Fabric:", all_cols, index=col_index(detected["fabric"]))
             tags_col = st.selectbox("Tags:", all_cols, index=col_index(detected["tags"]))
 
-    # Validate essential columns
     def get_actual_col(val):
         return None if val == "-- None / Ignore --" else val
 
@@ -576,26 +581,27 @@ def main():
             active_df = df
 
     with c_start:
-        start_btn = st.button("🚀 Start Download Process", type="primary", use_container_width=True)
+        button_label = "🚀 Start Download to Downloads/image_downloader" if is_direct_downloads else "🚀 Start Download & Prepare ZIP"
+        start_btn = st.button(button_label, type="primary", use_container_width=True)
 
     if start_btn:
         progress_bar = st.progress(0.0)
         status_text = st.empty()
         log_box = st.empty()
 
-        # Temporary working directory for staging files (and packaging ZIP)
+        # Temporary working directory for staging files
         temp_dir_obj = tempfile.TemporaryDirectory()
-        stage_root = Path(temp_dir_obj.name) / "DOWNLOADED_PRODUCTS"
+        stage_root = Path(temp_dir_obj.name) / "image_downloader"
         stage_root.mkdir(parents=True, exist_ok=True)
 
-        # Local directory setup if local saving is enabled
+        # Local directory setup if direct downloads is selected
         local_target_path = None
-        if save_to_local:
+        if is_direct_downloads:
             try:
-                local_target_path = Path(custom_folder).expanduser().resolve()
+                local_target_path = Path(target_local_path).expanduser().resolve()
                 local_target_path.mkdir(parents=True, exist_ok=True)
             except Exception as folder_err:
-                st.warning(f"Could not create local directory '{custom_folder}': {folder_err}. Falling back to staging directory.")
+                st.warning(f"Could not create local directory '{target_local_path}': {folder_err}. Falling back to ZIP package.")
                 local_target_path = None
 
         successful_images = 0
@@ -693,7 +699,7 @@ def main():
         with open(summary_file, "w", encoding="utf-8") as f:
             f.write("\n".join(summary_lines))
 
-        # Copy to local destination if requested
+        # Copy to local destination if direct downloads selected
         local_saved_success = False
         if local_target_path:
             try:
@@ -708,9 +714,9 @@ def main():
                         shutil.copy2(item, dest_item)
                 local_saved_success = True
             except Exception as copy_err:
-                log_msg(f"[!] Error saving to local destination: {copy_err}")
+                log_msg(f"[!] Error saving to Downloads folder: {copy_err}")
 
-        # Always build ZIP archive in memory for instant browser download
+        # Build ZIP archive
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(stage_root):
@@ -720,7 +726,7 @@ def main():
                     zipf.write(full_p, arcname=str(rel_p))
         zip_buffer.seek(0)
 
-        # Save results in session state so UI persists across interactions
+        # Save results in session state
         st.session_state.download_result = {
             "total_products": total_active_products,
             "successful_images": successful_images,
@@ -728,38 +734,36 @@ def main():
             "local_path": str(local_target_path) if local_saved_success else None,
             "zip_data": zip_buffer.getvalue(),
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "dest_mode": "direct" if is_direct_downloads else "zip",
         }
 
         status_text.markdown("✅ **Download complete!**")
 
     # --------------------------------------------------------
-    # STEP 5: DISPLAY RESULTS & DOWNLOAD BUTTON
+    # STEP 5: DISPLAY RESULTS & ACTIONS
     # --------------------------------------------------------
     if st.session_state.download_result:
         res = st.session_state.download_result
         st.write("---")
-        st.success("🎉 **Download Task Finished Successfully!**")
+        st.success("🎉 **Download Completed Successfully!**")
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Products Done", res["total_products"])
+        c1.metric("Products Processed", res["total_products"])
         c2.metric("Images Downloaded", res["successful_images"])
         c3.metric("Failed Images", res["failed_images"])
 
-        if is_cloud_environment():
-            st.info(
-                "💡 **Direct Browser Download to your Computer:**\n\n"
-                "Click the button below to download the entire catalog directly into your computer's **Downloads (`C:\\Users\\...\\Downloads`)** folder as a ZIP file. Once downloaded, extract it to see all organized product folders and images!"
-            )
-        elif res.get("local_path"):
-            st.markdown(f"**📂 Saved to Local Folder:**")
+        # Display Option 1: Local Downloads Folder details
+        if res.get("local_path"):
+            st.markdown("### 📂 Option 1: Downloaded to your PC's Downloads Folder")
             st.markdown(f'<div class="path-box">{res["local_path"]}</div>', unsafe_allow_html=True)
-            st.caption("You can open this folder directly in File Explorer on your computer.")
+            st.caption("All product folders, images (`01.webp`, etc.), and `product_info.txt` files are ready inside this folder.")
 
-        st.write("")
+        # Display Option 2: ZIP File Download Button
+        st.markdown("### 📦 Option 2: Download as ZIP Archive")
         st.download_button(
-            label="⬇️ Download All Folders as ZIP Archive (.zip) to PC Downloads",
+            label="⬇️ Download image_downloader.zip",
             data=res["zip_data"],
-            file_name=f"product_catalog_{res['timestamp']}.zip",
+            file_name=f"image_downloader_{res['timestamp']}.zip",
             mime="application/zip",
             type="primary",
             use_container_width=True,
