@@ -83,6 +83,17 @@ VALID_EXTENSIONS = {
 # DEFAULT SYSTEM DOWNLOADS DIRECTORY
 # ============================================================
 
+def is_cloud_environment():
+    """Detect if running on Streamlit Cloud or remote Linux container."""
+    return (
+        os.path.exists("/mount/src")
+        or os.environ.get("STREAMLIT_SERVER_FILE_WATCHER_TYPE") == "none"
+        or os.environ.get("HOSTNAME", "").startswith("streamlit")
+        or os.environ.get("STREAMLIT_SHARING_MODE") is not None
+        or (os.name != "nt" and "/mount" in str(Path.cwd()))
+    )
+
+
 def get_default_downloads_dir():
     """Get the standard OS Downloads folder path with a new timestamped subfolder."""
     home_dir = Path.home()
@@ -391,24 +402,34 @@ def main():
         timeout = st.number_input("Request timeout (seconds):", min_value=5, max_value=120, value=30)
         retries = st.number_input("Retry attempts:", min_value=1, max_value=5, value=3)
 
-        st.subheader("📁 Output Folder Settings")
-        save_to_local = st.checkbox(
-            "Save directly to computer folder (Local Mode)",
-            value=True,
-            help="Automatically creates a new folder in your system Downloads folder.",
-        )
+        is_cloud = is_cloud_environment()
 
-        custom_folder = st.text_input(
-            "Local Destination Path:",
-            value=st.session_state.target_folder_default,
-            disabled=not save_to_local,
-            help="Where product folders will be saved on your computer.",
-        )
+        st.subheader("📁 Output / Download Destination")
+        if is_cloud:
+            st.info(
+                "🌐 **Web Cloud Mode Active**\n\n"
+                "Because this app is running in the cloud, files will be packaged into a **ZIP archive** for direct download to your PC's standard **Downloads folder** (`C:\\Users\\...\\Downloads`)."
+            )
+            save_to_local = False
+            custom_folder = ""
+        else:
+            save_to_local = st.checkbox(
+                "Save directly to computer folder (Local Mode)",
+                value=True,
+                help="Automatically creates a new folder in your system Downloads folder.",
+            )
 
-        if save_to_local:
-            if st.button("🔄 Generate New Folder Name"):
-                st.session_state.target_folder_default = get_default_downloads_dir()
-                st.rerun()
+            custom_folder = st.text_input(
+                "Local Destination Path:",
+                value=st.session_state.target_folder_default,
+                disabled=not save_to_local,
+                help="Where product folders will be saved on your computer.",
+            )
+
+            if save_to_local:
+                if st.button("🔄 Generate New Folder Name"):
+                    st.session_state.target_folder_default = get_default_downloads_dir()
+                    st.rerun()
 
     # --------------------------------------------------------
     # STEP 1: FILE UPLOAD
@@ -724,14 +745,19 @@ def main():
         c2.metric("Images Downloaded", res["successful_images"])
         c3.metric("Failed Images", res["failed_images"])
 
-        if res["local_path"]:
+        if is_cloud_environment():
+            st.info(
+                "💡 **Direct Browser Download to your Computer:**\n\n"
+                "Click the button below to download the entire catalog directly into your computer's **Downloads (`C:\\Users\\...\\Downloads`)** folder as a ZIP file. Once downloaded, extract it to see all organized product folders and images!"
+            )
+        elif res.get("local_path"):
             st.markdown(f"**📂 Saved to Local Folder:**")
             st.markdown(f'<div class="path-box">{res["local_path"]}</div>', unsafe_allow_html=True)
             st.caption("You can open this folder directly in File Explorer on your computer.")
 
         st.write("")
         st.download_button(
-            label="⬇️ Download All Folders as ZIP Archive (.zip)",
+            label="⬇️ Download All Folders as ZIP Archive (.zip) to PC Downloads",
             data=res["zip_data"],
             file_name=f"product_catalog_{res['timestamp']}.zip",
             mime="application/zip",
